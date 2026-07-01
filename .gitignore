@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Logs / runtime
+*.log
+
+# Local user config that shouldn't be committed if someone develops in-tree
+/.claude-semaphore/

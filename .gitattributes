@@ -1,0 +1,4 @@
+# Force LF on all text files so shell scripts never get CRLF (which breaks them).
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf

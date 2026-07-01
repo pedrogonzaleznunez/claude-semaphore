@@ -1,0 +1,18 @@
+{
+  "_comment": "Editá labels, emojis, sonidos y tiempos a gusto. 'sound' puede ser el nombre de un sonido de /System/Library/Sounds (sin ruta) o una ruta absoluta a un .aiff/.wav. null = sin sonido.",
+
+  "states": {
+    "DONE":    { "icon": "✅", "label": "Claude finished",  "sound": "Glass.aiff",  "notify": true },
+    "WORKING": { "icon": "⌛️", "label": "Claude working",   "sound": null,          "notify": false },
+    "WAITING": { "icon": "‼️", "label": "Claude needs you", "sound": "Sosumi.aiff", "notify": true }
+  },
+
+  "cooking_frames": ["⌛️", "⏳"],
+
+  "poll_seconds": 0.25,
+  "red_debounce_seconds": 0.8,
+  "anim_seconds": 0.6,
+  "stale_seconds": 60,
+
+  "show_elapsed": false
+}
