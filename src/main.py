@@ -44,9 +44,9 @@ DEBOUNCE_STATE = "WAITING"
 
 DEFAULTS = {
     "states": {
-        "DONE":    {"icon": "✅", "label": "Claude finished",  "sound": "Glass.aiff",  "notify": True},
-        "WORKING": {"icon": "⌛️", "label": "Claude working",   "sound": None,          "notify": False},
-        "WAITING": {"icon": "‼️", "label": "Claude needs you", "sound": "Sosumi.aiff", "notify": True},
+        "DONE":    {"icon": "✅", "label": "Claudia finished",  "sound": "Glass.aiff",  "notify": True},
+        "WORKING": {"icon": "⌛️", "label": "Claudia working",   "sound": None,          "notify": False},
+        "WAITING": {"icon": "‼️", "label": "Claudia needs you", "sound": "Sosumi.aiff", "notify": True},
     },
     "cooking_frames": ["⌛️", "⏳"],
     "poll_seconds": 0.25,

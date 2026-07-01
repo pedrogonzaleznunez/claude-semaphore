@@ -4,7 +4,7 @@
 #
 # Qué hace:
 #   1. Crea ~/.claude-semaphore/ (app dir), con su propio venv + rumps.
-#   2. Copia monitor.py y crea config.json (respeta uno existente).
+#   2. Copia main.py y crea config.json (respeta uno existente).
 #   3. Integra los hooks en ~/.claude/settings.json de forma SEGURA
 #      (backup + merge idempotente, sin pisar tu config).
 #   4. Genera el LaunchAgent con tus rutas reales y lo carga (auto-arranque).
@@ -48,9 +48,9 @@ echo "📦 Instalando rumps…"
 "$VENV/bin/pip" install --quiet rumps
 
 # 5. Copiar app y config
-cp "$SCRIPT_DIR/monitor.py" "$APP_DIR/monitor.py"
+cp "$SCRIPT_DIR/src/main.py" "$APP_DIR/main.py"
 if [[ ! -f "$CONFIG_FILE" ]]; then
-  cp "$SCRIPT_DIR/config.example.json" "$CONFIG_FILE"
+  cp "$SCRIPT_DIR/config/config.example.json" "$CONFIG_FILE"
   echo "🛠  Config creada en $CONFIG_FILE"
 else
   echo "🛠  Ya existía config; se respeta: $CONFIG_FILE"
@@ -62,7 +62,7 @@ printf DONE > "$STATE_FILE"
 # 7. Merge SEGURO de hooks en settings.json
 echo "🪝 Integrando hooks en ${CLAUDE_SETTINGS}…"
 mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
-HOOKS_JSON="$SCRIPT_DIR/hooks.json" python3 - "$CLAUDE_SETTINGS" <<'PY'
+HOOKS_JSON="$SCRIPT_DIR/config/hooks.json" python3 - "$CLAUDE_SETTINGS" <<'PY'
 import json, os, sys, time, shutil
 
 settings_path = sys.argv[1]
@@ -98,9 +98,9 @@ PY
 # 8. Generar el LaunchAgent con rutas reales
 echo "🚀 Configurando auto-arranque…"
 sed -e "s|{{PYTHON}}|$VENV/bin/python3|g" \
-    -e "s|{{SCRIPT}}|$APP_DIR/monitor.py|g" \
+    -e "s|{{SCRIPT}}|$APP_DIR/main.py|g" \
     -e "s|{{APP_ID}}|$APP_ID|g" \
-    "$SCRIPT_DIR/com.claude-semaphore.plist.template" > "$PLIST"
+    "$SCRIPT_DIR/config/com.claude-semaphore.plist.template" > "$PLIST"
 
 # 9. Cargar
 launchctl unload "$PLIST" 2>/dev/null || true

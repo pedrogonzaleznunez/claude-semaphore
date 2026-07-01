@@ -25,7 +25,7 @@ Claude Code ──(hooks)──▶ ~/.claude-semaphore/state ──(polling)─�
 ```
 
 - **The brain — hooks.** Claude Code [hooks](https://docs.claude.com/en/docs/claude-code/hooks) write a word (`WORKING` / `WAITING` / `DONE`) to the state file on each event. This part is plain `printf`, so it's fully portable.
-- **The face — `monitor.py`.** A [`rumps`](https://github.com/jaredks/rumps) menu bar app polls the file and updates the icon, plays sounds and posts notifications.
+- **The face — `main.py`.** A [`rumps`](https://github.com/jaredks/rumps) menu bar app polls the file and updates the icon, plays sounds and posts notifications.
 
 **Detecting "needs you" without a dedicated event.** Claude Code's `Notification` hook does not fire for permission prompts while the terminal is focused. So instead: every tool fires `PreToolUse` (→ `WAITING`) and, when it finishes, `PostToolUse` (→ `WORKING`). A tool that runs on its own flips back in milliseconds; a tool that waits for your confirmation stays in `WAITING`. A short **debounce** filters the fast blips so only a real wait turns the icon red.
 
@@ -46,7 +46,7 @@ cd claude-semaphore
 The installer:
 
 1. Creates `~/.claude-semaphore/` with its own Python venv + `rumps`.
-2. Copies `monitor.py` and creates `config.json` (an existing one is respected).
+2. Copies `main.py` and creates `config.json` (an existing one is respected).
 3. **Safely merges** the hooks into `~/.claude/settings.json` — it backs the file up first and never overwrites your existing settings (idempotent: re-running won't duplicate).
 4. Installs a LaunchAgent so the app starts at login, and launches it now.
 
@@ -69,7 +69,7 @@ Both toggles persist across restarts.
 
 ## Configure
 
-Everything visible lives in `~/.claude-semaphore/config.json` (see [`config.example.json`](config.example.json)):
+Everything visible lives in `~/.claude-semaphore/config.json` (see [`config.example.json`](config/config.example.json)):
 
 | Key | What |
 |---|---|
