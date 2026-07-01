@@ -21,7 +21,7 @@ PLIST="$HOME/Library/LaunchAgents/$APP_ID.plist"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "🚦 Instalando $APP_NAME…"
+echo "🚦 Instalando ${APP_NAME}…"
 
 # 1. Solo macOS (beta)
 if [[ "$(uname)" != "Darwin" ]]; then
@@ -40,7 +40,7 @@ mkdir -p "$APP_DIR" "$(dirname "$PLIST")"
 
 # 4. venv + rumps
 if [[ ! -d "$VENV" ]]; then
-  echo "📦 Creando entorno virtual en $VENV…"
+  echo "📦 Creando entorno virtual en ${VENV}…"
   python3 -m venv "$VENV"
 fi
 "$VENV/bin/pip" install --quiet --upgrade pip
@@ -60,7 +60,7 @@ fi
 printf DONE > "$STATE_FILE"
 
 # 7. Merge SEGURO de hooks en settings.json
-echo "🪝 Integrando hooks en $CLAUDE_SETTINGS…"
+echo "🪝 Integrando hooks en ${CLAUDE_SETTINGS}…"
 mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
 HOOKS_JSON="$SCRIPT_DIR/hooks.json" python3 - "$CLAUDE_SETTINGS" <<'PY'
 import json, os, sys, time, shutil

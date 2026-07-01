@@ -160,7 +160,7 @@ class Semaphore(rumps.App):
         initial = read_state()
         if initial in self.states:
             self.current = initial
-            self.title = self._title(initial)
+            self.title = self._make_title(initial)
             self.info.title = f'Status: {self.states[initial]["label"]}'
 
         # Timers with intervals from config (programmatic, not decorators).
@@ -170,7 +170,7 @@ class Semaphore(rumps.App):
         self._t_anim.start()
 
     # ---- helpers ----
-    def _title(self, state, frame_icon=None, elapsed=""):
+    def _make_title(self, state, frame_icon=None, elapsed=""):
         st = self.states[state]
         icon = frame_icon if frame_icon else st["icon"]
         suffix = f" {elapsed}" if elapsed else ""
@@ -248,14 +248,14 @@ class Semaphore(rumps.App):
         elapsed = ""
         if self.cfg.get("show_elapsed") and self.work_since:
             elapsed = _fmt_elapsed(time.time() - self.work_since)
-        self.title = self._title(ANIM_STATE, frame_icon=self.frames[self.frame], elapsed=elapsed)
+        self.title = self._make_title(ANIM_STATE, frame_icon=self.frames[self.frame], elapsed=elapsed)
 
     def apply(self, state, alert=True):
         st = self.states[state]
         self.frame = 0
         if state == ANIM_STATE:
             self.work_since = time.time()
-        self.title = self._title(state)
+        self.title = self._make_title(state)
         self.info.title = f'Status: {st["label"]}'
         if alert:
             snd = resolve_sound(st.get("sound")) if self.sound_on else None
