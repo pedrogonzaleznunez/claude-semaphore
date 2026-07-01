@@ -2,6 +2,8 @@
 
 A tiny macOS **menu bar traffic light** for [Claude Code](https://claude.com/claude-code). See at a glance whether Claude is working, done, or waiting for you — without keeping the terminal in focus.
 
+![Claude Semaphore demo](assets/demo.gif)
+
 | Menu bar | State | When |
 |---|---|---|
 | ✅ Claude finished | done | Claude finished responding |
