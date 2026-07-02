@@ -302,6 +302,7 @@ class Semaphore(rumps.App):
         self._work_took = {}       # sid -> seconds spent WORKING before it last finished
         self._menu_sig = None      # signature of the last-rendered session list (skip no-op rebuilds)
         self._row_keys = []        # menu keys of the currently-inserted session rows
+        self._ready = False        # gate per-session "finished" alerts until after startup
 
         # Timers are event-driven: the animation timer runs *only* while WORKING;
         # the debounce timer is a one-shot armed when WAITING appears; the sweep
@@ -317,6 +318,7 @@ class Semaphore(rumps.App):
 
         # Show the initial aggregate state (silently, no sound/notification on launch).
         self._recompute(initial=True)
+        self._ready = True   # from here on, per-session transitions may alert
 
         # Watch the sessions dir by event (kqueue on the main run loop); fall back
         # to a light poll only if the CoreFoundation bridge isn't available.
@@ -535,6 +537,13 @@ class Semaphore(rumps.App):
                 if prev and prev[0] == "WORKING":   # remember how long the finished task ran
                     self._work_took[sid] = now - prev[1]
                 self._since[sid] = (rec["state"], now)
+                rec["_work_took"] = self._work_took.get(sid, 0)
+                # Per-session "finished": alert when *this* session reaches DONE,
+                # even if other sessions are still working. `prev` guards startup
+                # and first sightings (we don't chime for pre-existing DONE files).
+                if (self._ready and prev and rec["state"] == "DONE"
+                        and rec.get("_sid") != "_legacy"):
+                    self._alert("DONE", rec)
             rec["_elapsed"] = now - self._since[sid][1]
             rec["_work_took"] = self._work_took.get(sid, 0)
         self._since = {sid: v for sid, v in self._since.items() if sid in sessions}
@@ -686,13 +695,25 @@ class Semaphore(rumps.App):
             elapsed = _fmt_elapsed(time.time() - self.work_since)
         self.title = self._make_title(ANIM_STATE, frame_icon=self.frames[self.frame], elapsed=elapsed)
 
-    def _notify(self, state):
+    def _alert(self, state, rec=None):
+        """Play the sound + post the notification for a state (respecting toggles)."""
+        st = self.states.get(state, {})
+        if self.sound_on:
+            snd = resolve_sound(st.get("sound"))
+            if snd:
+                subprocess.Popen(["afplay", snd],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if self.notif_on and st.get("notify"):
+            self._notify(state, rec)
+
+    def _notify(self, state, rec=None):
         """Post a macOS notification naming the project and what it's about.
 
         The detail goes in the *body* (never empty — an empty-body notification
         won't reliably show) and the project headline in the title.
         """
-        rec = self._relevant_session(state)
+        if rec is None:
+            rec = self._relevant_session(state)
         project = (rec or {}).get("project", "")
         icon = self.states[state]["icon"]
         if state == DEBOUNCE_STATE:
@@ -716,7 +737,6 @@ class Semaphore(rumps.App):
         return max(cands, key=lambda s: s.get("updated", 0)) if cands else None
 
     def apply(self, state, alert=True):
-        st = self.states[state]
         self.frame = 0
         # Run the animation timer only while WORKING (it also does the stale check).
         if state == ANIM_STATE:
@@ -730,13 +750,10 @@ class Semaphore(rumps.App):
         self.current = state
         self.title = self._make_title(state)
         # (the header summary line is owned by _rebuild_session_menu)
-        if alert:
-            snd = resolve_sound(st.get("sound")) if self.sound_on else None
-            if snd:
-                subprocess.Popen(["afplay", snd],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if self.notif_on and st.get("notify"):
-                self._notify(state)
+        # "finished" alerts are fired per session in _track_elapsed; the aggregate
+        # only chimes for a real WAITING (needs-you), after the debounce.
+        if alert and state == DEBOUNCE_STATE:
+            self._alert(state)
 
 
 if __name__ == "__main__":
