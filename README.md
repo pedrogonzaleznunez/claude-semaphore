@@ -49,6 +49,7 @@ The installer:
 2. Copies `main.py` and creates `config.json` (an existing one is respected).
 3. **Safely merges** the hooks into `~/.claude/settings.json` — it backs the file up first and never overwrites your existing settings (idempotent: re-running won't duplicate).
 4. Installs a LaunchAgent so the app starts at login, and launches it now.
+5. Drops a `Claude Semaphore.app` into `~/Applications` so you can [reopen it manually](#reopening-it-manually) from Spotlight/Finder.
 
 **Then restart Claude Code** so it picks up the hooks (accept the hook-review prompt if it appears).
 
@@ -59,11 +60,18 @@ The installer:
 Click the icon:
 
 - **Notifications** — toggle the macOS notifications.
-- **Play sounds** — toggle the sounds.
+- **Play sounds** — master switch for all sounds.
+- **Sound per state** — pick the sound for each state (**Finished** / **Working** / **Needs you**) from the macOS system sounds, or **None**. It previews the sound as you pick it and remembers your choice across restarts (overriding `config.json`).
 - **Restart (hard reset)** — clears the state and relaunches the process if anything gets stuck.
 - **Quit Claude Semaphore**.
 
 Both toggles persist across restarts.
+
+### Reopening it manually
+
+Quit the app (or it isn't running)? The installer drops a **`Claude Semaphore.app`** into `~/Applications`, so you can reopen it like any other app — search "Claude Semaphore" in **Spotlight** (⌘Space), or double-click it in Finder / Launchpad. It just wakes the background agent back up (and does nothing if it's already running).
+
+Prefer the terminal? `launchctl kickstart gui/$(id -u)/com.claude-semaphore.agent` does the same thing.
 
 ---
 
@@ -93,7 +101,7 @@ Edit it, then **Restart (hard reset)** from the menu.
 ./uninstall.sh
 ```
 
-Removes the LaunchAgent and cleanly strips only *its own* hooks from `settings.json` (with a backup). It asks before deleting `~/.claude-semaphore/`.
+Removes the LaunchAgent and the `Claude Semaphore.app`, and cleanly strips only *its own* hooks from `settings.json` (with a backup). It asks before deleting `~/.claude-semaphore/`.
 
 ---
 

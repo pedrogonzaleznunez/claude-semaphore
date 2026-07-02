@@ -18,6 +18,7 @@ STATE_FILE="$APP_DIR/state"
 CONFIG_FILE="$APP_DIR/config.json"
 VENV="$APP_DIR/venv"
 PLIST="$HOME/Library/LaunchAgents/$APP_ID.plist"
+APP_BUNDLE="$HOME/Applications/$APP_NAME.app"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -85,9 +86,17 @@ MARK = ".claude-semaphore/state"  # firma de NUESTROS comandos
 def is_ours(entry):
     return any(MARK in h.get("command", "") for h in entry.get("hooks", []))
 
+# 1) Sacar NUESTROS hooks de TODOS los eventos (idempotente, y así se limpian
+#    eventos que ya no usamos, p.ej. el viejo "Notification").
+for event in list(hooks.keys()):
+    hooks[event] = [e for e in hooks[event] if not is_ours(e)]
+    if not hooks[event]:
+        del hooks[event]
+
+# 2) Agregar los hooks actuales de hooks.json.
 for event, entries in our_hooks.items():
-    kept = [e for e in hooks.get(event, []) if not is_ours(e)]  # idempotente
-    hooks[event] = kept + entries
+    hooks.setdefault(event, [])
+    hooks[event] += entries
 
 with open(settings_path, "w") as f:
     json.dump(settings, f, indent=2, ensure_ascii=False)
@@ -106,11 +115,56 @@ sed -e "s|{{PYTHON}}|$VENV/bin/python3|g" \
 launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST"
 
+# 10. App para abrir manualmente (Spotlight / Finder / Launchpad)
+#     Es un .app mínimo que revive el LaunchAgent con `launchctl kickstart`
+#     (sin -k: si ya está corriendo, es un no-op).
+echo "🖱  Creando app para abrir manualmente en ${APP_BUNDLE}…"
+MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$MACOS_DIR"
+
+cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>$APP_NAME</string>
+    <key>CFBundleDisplayName</key><string>$APP_NAME</string>
+    <key>CFBundleIdentifier</key><string>com.claude-semaphore.launcher</string>
+    <key>CFBundleExecutable</key><string>launcher</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>1.0</string>
+</dict>
+</plist>
+EOF
+
+cat > "$MACOS_DIR/launcher" <<EOF
+#!/bin/bash
+# Claude Semaphore — abre la app de la barra de menú a pedido.
+APP_ID="$APP_ID"
+PLIST="$PLIST"
+DOMAIN="gui/\$(id -u)"
+
+if launchctl print "\$DOMAIN/\$APP_ID" >/dev/null 2>&1; then
+  # Agente ya cargado: lo arranca si está muerto; no-op (sin -k) si ya corre.
+  launchctl kickstart "\$DOMAIN/\$APP_ID"
+else
+  # No está cargado (p.ej. se desactivó): lo carga, y RunAtLoad lo arranca.
+  launchctl bootstrap "\$DOMAIN" "\$PLIST" 2>/dev/null || launchctl load "\$PLIST"
+fi
+EOF
+chmod +x "$MACOS_DIR/launcher"
+
+# Refrescar el registro de LaunchServices para que Spotlight/Finder la vean ya.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -f "$APP_BUNDLE" 2>/dev/null || true
+
 cat <<EOF
 
 🎉 ¡Listo!
    • El ícono debería aparecer arriba en la barra de menú.
    • Reiniciá Claude Code para que tome los hooks (aceptá el cartel de revisión si aparece).
+   • Para abrirla manualmente: buscá "$APP_NAME" en Spotlight (⌘Espacio) o abrila desde $APP_BUNDLE.
    • Config editable en: $CONFIG_FILE
    • Desinstalar:        ./uninstall.sh
 EOF

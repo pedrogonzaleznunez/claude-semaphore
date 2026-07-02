@@ -8,9 +8,6 @@
   "PostToolUse": [
     { "matcher": "*", "hooks": [ { "type": "command", "command": "printf WORKING > \"$HOME/.claude-semaphore/state\"" } ] }
   ],
-  "Notification": [
-    { "hooks": [ { "type": "command", "command": "printf WAITING > \"$HOME/.claude-semaphore/state\"" } ] }
-  ],
   "Stop": [
     { "hooks": [ { "type": "command", "command": "printf DONE > \"$HOME/.claude-semaphore/state\"" } ] }
   ]

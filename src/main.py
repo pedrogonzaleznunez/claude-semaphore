@@ -36,7 +36,11 @@ STATE_FILE = os.path.join(APP_DIR, "state")
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 NOTIF_FILE = os.path.join(APP_DIR, "notif_enabled")   # menu toggle: notifications
 SOUND_FILE = os.path.join(APP_DIR, "sound_enabled")   # menu toggle: sounds
+SOUNDS_FILE = os.path.join(APP_DIR, "sounds.json")    # menu: per-state sound overrides
 LOCK_FILE = "/tmp/claude-semaphore.lock"
+
+# Nice, short names for the per-state sound submenus (falls back to the state token).
+SOUND_MENU_NAMES = {"DONE": "Finished", "WORKING": "Working", "WAITING": "Needs you"}
 
 # The state whose emoji animates, and the one that gets debounced (permission wait).
 ANIM_STATE = "WORKING"
@@ -126,6 +130,41 @@ def _write_flag(path, on):
         f.write("on" if on else "off")
 
 
+def load_sound_overrides():
+    """Per-state sound choices picked from the menu: {state: "Glass.aiff" | None}."""
+    try:
+        with open(SOUNDS_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_sound_overrides(overrides):
+    try:
+        with open(SOUNDS_FILE, "w") as f:
+            json.dump(overrides, f, indent=2)
+    except Exception:
+        pass
+
+
+def list_system_sounds():
+    """Bare names (no .aiff) of the macOS system sounds, for the menu."""
+    try:
+        return sorted(n[:-5] for n in os.listdir("/System/Library/Sounds")
+                      if n.endswith(".aiff"))
+    except OSError:
+        return []
+
+
+def _sound_name(value):
+    """Config value ('Glass.aiff' | 'Glass' | a path | None) -> bare menu name or None."""
+    if not value:
+        return None
+    base = os.path.basename(value)
+    return base[:-5] if base.endswith(".aiff") else base
+
+
 def _fmt_elapsed(seconds):
     seconds = int(seconds)
     if seconds < 60:
@@ -143,13 +182,20 @@ class Semaphore(rumps.App):
         self.notif_on = _read_flag(NOTIF_FILE)
         self.sound_on = _read_flag(SOUND_FILE)
 
+        # Per-state sound choices from the menu override whatever config.json set.
+        self._sound_overrides = load_sound_overrides()
+        for st, val in self._sound_overrides.items():
+            if st in self.states:
+                self.states[st]["sound"] = val
+
         self.info = rumps.MenuItem("Starting…")
         self.item_notif = rumps.MenuItem("Notifications", callback=self.toggle_notif)
         self.item_notif.state = 1 if self.notif_on else 0
         self.item_sound = rumps.MenuItem("Play sounds", callback=self.toggle_sound)
         self.item_sound.state = 1 if self.sound_on else 0
         self.item_reset = rumps.MenuItem("Restart (hard reset)", callback=self.restart)
-        self.menu = [self.info, None, self.item_notif, self.item_sound, None, self.item_reset]
+        self.menu = [self.info, None, self.item_notif, self.item_sound,
+                     self._build_sound_menu(), None, self.item_reset]
 
         self.current = None        # last shown state token
         self.red_since = None      # when DEBOUNCE_STATE started (for debounce)
@@ -175,6 +221,45 @@ class Semaphore(rumps.App):
         icon = frame_icon if frame_icon else st["icon"]
         suffix = f" {elapsed}" if elapsed else ""
         return f'{icon} {st["label"]}{suffix}'
+
+    # ---- per-state sound picker ----
+    def _build_sound_menu(self):
+        """A "Sound per state" submenu: one submenu per state listing every
+        macOS system sound (plus None), with the current choice checked."""
+        self.sound_items = {}  # (state, name|None) -> MenuItem, for updating checkmarks
+        root = rumps.MenuItem("Sound per state")
+        available = list_system_sounds()
+        for state in ("DONE", "WORKING", "WAITING"):
+            if state not in self.states:
+                continue
+            sub = rumps.MenuItem(SOUND_MENU_NAMES.get(state, state))
+            current = _sound_name(self.states[state].get("sound"))
+            for name in [None] + available:
+                item = rumps.MenuItem(name or "None", callback=self._make_sound_cb(state, name))
+                item.state = 1 if current == name else 0
+                sub.add(item)
+                self.sound_items[(state, name)] = item
+            root.add(sub)
+        return root
+
+    def _make_sound_cb(self, state, name):
+        def _cb(_sender):
+            self.choose_sound(state, name)
+        return _cb
+
+    def choose_sound(self, state, name):
+        """Set (and persist) the sound for one state, then preview it."""
+        value = f"{name}.aiff" if name else None
+        self.states[state]["sound"] = value
+        self._sound_overrides[state] = value
+        save_sound_overrides(self._sound_overrides)
+        for (st, nm), item in self.sound_items.items():
+            if st == state:
+                item.state = 1 if nm == name else 0
+        snd = resolve_sound(value)  # preview the pick regardless of the master toggle
+        if snd:
+            subprocess.Popen(["afplay", snd],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # ---- menu toggles ----
     def toggle_notif(self, sender):

@@ -7,6 +7,7 @@ set -euo pipefail
 APP_ID="com.claude-semaphore.agent"
 APP_DIR="$HOME/.claude-semaphore"
 PLIST="$HOME/Library/LaunchAgents/$APP_ID.plist"
+APP_BUNDLE="$HOME/Applications/Claude Semaphore.app"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 
 echo "🧹 Desinstalando Claude Semaphore…"
@@ -14,6 +15,9 @@ echo "🧹 Desinstalando Claude Semaphore…"
 # 1. Parar y quitar el auto-arranque
 launchctl unload "$PLIST" 2>/dev/null || true
 rm -f "$PLIST"
+
+# 1b. Quitar la app de "abrir manualmente"
+rm -rf "$APP_BUNDLE"
 
 # 2. Sacar NUESTROS hooks del settings.json, dejando el resto intacto (con backup)
 if [[ -f "$CLAUDE_SETTINGS" ]]; then
