@@ -1,14 +1,17 @@
 {
   "UserPromptSubmit": [
-    { "hooks": [ { "type": "command", "command": "printf WORKING > \"$HOME/.claude-semaphore/state\"" } ] }
+    { "hooks": [ { "type": "command", "command": "\"$HOME/.claude-semaphore/venv/bin/python3\" \"$HOME/.claude-semaphore/hook.py\" WORKING" } ] }
   ],
   "PreToolUse": [
-    { "matcher": "*", "hooks": [ { "type": "command", "command": "printf WAITING > \"$HOME/.claude-semaphore/state\"" } ] }
+    { "matcher": "*", "hooks": [ { "type": "command", "command": "\"$HOME/.claude-semaphore/venv/bin/python3\" \"$HOME/.claude-semaphore/hook.py\" WORKING" } ] }
   ],
   "PostToolUse": [
-    { "matcher": "*", "hooks": [ { "type": "command", "command": "printf WORKING > \"$HOME/.claude-semaphore/state\"" } ] }
+    { "matcher": "*", "hooks": [ { "type": "command", "command": "\"$HOME/.claude-semaphore/venv/bin/python3\" \"$HOME/.claude-semaphore/hook.py\" WORKING" } ] }
+  ],
+  "Notification": [
+    { "matcher": "permission_prompt", "hooks": [ { "type": "command", "command": "\"$HOME/.claude-semaphore/venv/bin/python3\" \"$HOME/.claude-semaphore/hook.py\" WAITING" } ] }
   ],
   "Stop": [
-    { "hooks": [ { "type": "command", "command": "printf DONE > \"$HOME/.claude-semaphore/state\"" } ] }
+    { "hooks": [ { "type": "command", "command": "\"$HOME/.claude-semaphore/venv/bin/python3\" \"$HOME/.claude-semaphore/hook.py\" DONE" } ] }
   ]
 }

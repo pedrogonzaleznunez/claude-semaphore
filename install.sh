@@ -48,8 +48,10 @@ fi
 echo "📦 Instalando rumps…"
 "$VENV/bin/pip" install --quiet rumps
 
-# 5. Copiar app y config
+# 5. Copiar app, hook emitter y config
 cp "$SCRIPT_DIR/src/main.py" "$APP_DIR/main.py"
+cp "$SCRIPT_DIR/src/hook.py" "$APP_DIR/hook.py"
+mkdir -p "$APP_DIR/sessions"   # una entrada por sesión de Claude (multi-proyecto)
 if [[ ! -f "$CONFIG_FILE" ]]; then
   cp "$SCRIPT_DIR/config/config.example.json" "$CONFIG_FILE"
   echo "🛠  Config creada en $CONFIG_FILE"
@@ -81,7 +83,7 @@ if os.path.exists(settings_path):
         settings = {}
 
 hooks = settings.setdefault("hooks", {})
-MARK = ".claude-semaphore/state"  # firma de NUESTROS comandos
+MARK = ".claude-semaphore/"  # firma de NUESTROS comandos (matchea el viejo …/state y el nuevo …/hook.py)
 
 def is_ours(entry):
     return any(MARK in h.get("command", "") for h in entry.get("hooks", []))

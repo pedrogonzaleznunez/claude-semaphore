@@ -43,7 +43,8 @@ except Exception:
 
 APP_ID = "com.claude-semaphore.agent"
 APP_DIR = os.path.expanduser("~/.claude-semaphore")
-STATE_FILE = os.path.join(APP_DIR, "state")
+STATE_FILE = os.path.join(APP_DIR, "state")           # legacy single-state file (fallback)
+SESSIONS_DIR = os.path.join(APP_DIR, "sessions")      # one <session_id>.json per Claude session
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 NOTIF_FILE = os.path.join(APP_DIR, "notif_enabled")   # menu toggle: notifications
 SOUND_FILE = os.path.join(APP_DIR, "sound_enabled")   # menu toggle: sounds
@@ -57,11 +58,23 @@ SOUND_MENU_NAMES = {"DONE": "Finished", "WORKING": "Working", "WAITING": "Needs 
 ANIM_STATE = "WORKING"
 DEBOUNCE_STATE = "WAITING"
 
+# Aggregating many sessions into one icon: the loudest state wins. If any session
+# needs you it's red; else if any is working it's amber; else green.
+STATE_PRIORITY = {"DONE": 0, "WORKING": 1, "WAITING": 2}
+
+# TERM_PROGRAM -> AppleScript app name, used only when a bundle id isn't available.
+TERM_APP_NAMES = {
+    "Apple_Terminal": "Terminal",
+    "iTerm.app": "iTerm",
+    "vscode": "Visual Studio Code",
+    "WezTerm": "WezTerm",
+    "Hyper": "Hyper",
+    "Tabby": "Tabby",
+}
+
 # kqueue file-watching constants (no polling).
 O_EVTONLY = 0x8000          # macOS: open a fd only to receive kqueue events
 KQ_READ_CB = 1              # kCFFileDescriptorReadCallBack
-_FILE_FFLAGS = (select.KQ_NOTE_WRITE | select.KQ_NOTE_EXTEND | select.KQ_NOTE_DELETE
-                | select.KQ_NOTE_RENAME | select.KQ_NOTE_ATTRIB)
 _DIR_FFLAGS = (select.KQ_NOTE_WRITE | select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME)
 
 DEFAULTS = {
@@ -74,6 +87,8 @@ DEFAULTS = {
     "red_debounce_seconds": 0.8,
     "anim_seconds": 0.6,
     "stale_seconds": 60,
+    "done_ttl_seconds": 20,   # how long a finished session lingers in the menu before it's dropped
+    "sweep_seconds": 4,       # janitor cadence while any session is active (expires stale ones)
     "show_elapsed": False,
 }
 
@@ -189,6 +204,63 @@ def _fmt_elapsed(seconds):
     return f"{seconds // 60}m{seconds % 60:02d}s"
 
 
+def _osa_escape(s):
+    """Escape a string for embedding inside an AppleScript double-quoted literal."""
+    return (s or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+# Focus the exact Terminal.app tab / iTerm2 session that owns a given tty, then
+# bring its app forward. Other terminals can't be driven per-tab reliably, so we
+# just activate the app by its bundle id (captured when the session started).
+_APPLE_TERMINAL_BY_TTY = '''
+tell application "Terminal"
+  activate
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        if tty of t is "{tty}" then
+          set selected of t to true
+          set frontmost of w to true
+        end if
+      end try
+    end repeat
+  end repeat
+end tell'''
+
+_ITERM_BY_TTY = '''
+tell application "iTerm"
+  activate
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        try
+          if tty of s is "{tty}" then
+            select s
+          end if
+        end try
+      end repeat
+    end repeat
+  end repeat
+end tell'''
+
+
+def build_focus_script(rec):
+    """AppleScript to focus the terminal a session lives in (best effort)."""
+    bundle = rec.get("bundle_id") or ""
+    term = rec.get("term_program") or ""
+    tty = rec.get("tty") or ""
+    if tty and (bundle == "com.apple.Terminal" or term == "Apple_Terminal"):
+        return _APPLE_TERMINAL_BY_TTY.format(tty=_osa_escape(tty))
+    if tty and (bundle == "com.googlecode.iterm2" or term == "iTerm.app"):
+        return _ITERM_BY_TTY.format(tty=_osa_escape(tty))
+    if bundle:
+        return f'tell application id "{_osa_escape(bundle)}" to activate'
+    name = TERM_APP_NAMES.get(term)
+    if name:
+        return f'tell application "{_osa_escape(name)}" to activate'
+    return ""
+
+
 class Semaphore(rumps.App):
     def __init__(self, cfg):
         super().__init__("🚦", quit_button=rumps.MenuItem("Quit Claude Semaphore"))
@@ -205,40 +277,47 @@ class Semaphore(rumps.App):
             if st in self.states:
                 self.states[st]["sound"] = val
 
-        self.info = rumps.MenuItem("Starting…")
+        # Clicking the status line jumps to whichever session most wants attention.
+        self.info = rumps.MenuItem("Starting…", callback=self._focus_top)
+        self.sessions_menu = rumps.MenuItem("Sessions")
         self.item_notif = rumps.MenuItem("Notifications", callback=self.toggle_notif)
         self.item_notif.state = 1 if self.notif_on else 0
         self.item_sound = rumps.MenuItem("Play sounds", callback=self.toggle_sound)
         self.item_sound.state = 1 if self.sound_on else 0
         self.item_reset = rumps.MenuItem("Restart (hard reset)", callback=self.restart)
-        self.menu = [self.info, None, self.item_notif, self.item_sound,
-                     self._build_sound_menu(), None, self.item_reset]
+        self.menu = [self.info, self.sessions_menu, None,
+                     self.item_notif, self.item_sound, self._build_sound_menu(),
+                     None, self.item_reset]
 
-        self.current = None        # last shown state token
+        self.current = None        # last shown aggregate state token
         self.red_since = None      # when DEBOUNCE_STATE started (for debounce)
         self.frame = 0             # hourglass frame
         self.work_since = 0.0      # when WORKING started (for the elapsed timer)
+        self._sessions = {}        # sid -> record, refreshed on every recompute
+        self._menu_sig = None      # signature of the last-rendered session list (skip no-op rebuilds)
 
-        # Timers are event-driven now: the animation timer runs *only* while
-        # WORKING (it also does the anti-stuck check); the debounce timer is a
-        # one-shot armed when WAITING appears. Neither polls the state file.
+        # Timers are event-driven: the animation timer runs *only* while WORKING;
+        # the debounce timer is a one-shot armed when WAITING appears; the sweep
+        # timer runs only while sessions are active and expires stale ones (the
+        # anti-stuck check, e.g. a run cancelled with Escape). None poll idly.
         self._t_anim = rumps.Timer(self.animate, cfg["anim_seconds"])
         self._anim_running = False
         self._t_debounce = rumps.Timer(self._debounce_fire, cfg["red_debounce_seconds"])
+        self._t_sweep = rumps.Timer(self._sweep, cfg.get("sweep_seconds", 4))
+        self._sweep_running = False
 
-        # Show the initial state (silently, no sound/notification on launch).
-        initial = read_state()
-        if initial in self.states:
-            self.apply(initial, alert=False)
+        os.makedirs(SESSIONS_DIR, exist_ok=True)
 
-        # Watch the state file by event (kqueue on the main run loop); fall back
+        # Show the initial aggregate state (silently, no sound/notification on launch).
+        self._recompute(initial=True)
+
+        # Watch the sessions dir by event (kqueue on the main run loop); fall back
         # to a light poll only if the CoreFoundation bridge isn't available.
-        self._file_fd = -1
-        self._dir_fd = -1
+        self._dir_fds = []
         if CFFileDescriptorCreate is not None:
             self._setup_watch()
         else:
-            self._t_poll = rumps.Timer(lambda _: self._process(read_state()), 0.25)
+            self._t_poll = rumps.Timer(lambda _: self._recompute(), 0.25)
             self._t_poll.start()
 
         # Re-assert menu-bar-only mode shortly after launch (run() can reset it).
@@ -326,17 +405,20 @@ class Semaphore(rumps.App):
         hide_from_dock()
         sender.stop()
 
-    # ---- state file watcher (kqueue on the main run loop; no polling) ----
+    # ---- sessions-dir watcher (kqueue on the main run loop; no polling) ----
     def _setup_watch(self):
         self._kq = select.kqueue()
-        # Watch the dir (stable inode) so we notice the state file being (re)created,
-        # and the file itself for in-place writes (the hooks do `printf > file`).
-        try:
-            self._dir_fd = os.open(APP_DIR, O_EVTONLY)
-            self._kq_register(self._dir_fd, _DIR_FFLAGS)
-        except OSError:
-            self._dir_fd = -1
-        self._open_state_file()
+        # The hooks write each session atomically (write tmp + rename), which bumps
+        # the directory vnode — so watching the dirs delivers every update by event.
+        # We watch both the sessions dir and the app dir (the latter also catches
+        # the legacy single-state file being (re)created during an upgrade).
+        for d in (SESSIONS_DIR, APP_DIR):
+            try:
+                fd = os.open(d, O_EVTONLY)
+                self._kq_register(fd, _DIR_FFLAGS)
+                self._dir_fds.append(fd)
+            except OSError:
+                pass
         self._cffd = CFFileDescriptorCreate(None, self._kq.fileno(), False, self._on_kq, None)
         src = CFFileDescriptorCreateRunLoopSource(None, self._cffd, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopDefaultMode)
@@ -348,34 +430,151 @@ class Semaphore(rumps.App):
                            flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR, fflags=fflags)
         self._kq.control([ev], 0, 0)
 
-    def _open_state_file(self):
-        """(Re)attach the file watch to the current state-file inode."""
-        if self._file_fd >= 0:
-            try:
-                os.close(self._file_fd)
-            except OSError:
-                pass
-            self._file_fd = -1
-        try:
-            fd = os.open(STATE_FILE, O_EVTONLY)
-            self._kq_register(fd, _FILE_FFLAGS)
-            self._file_fd = fd
-        except OSError:
-            self._file_fd = -1
-
     def _on_kq(self, cffd, callback_types, info):
         try:
-            events = self._kq.control(None, 16, 0)  # drain, non-blocking
+            self._kq.control(None, 16, 0)  # drain, non-blocking
         except OSError:
-            events = []
-        file_gone = any(e.ident == self._file_fd
-                        and (e.fflags & (select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME))
-                        for e in events)
-        dir_touched = any(e.ident == self._dir_fd for e in events)
-        if file_gone or (dir_touched and self._file_fd < 0):
-            self._open_state_file()  # reattach to the recreated file
-        self._process(read_state())
+            pass
+        self._recompute()
         CFFileDescriptorEnableCallBacks(cffd, KQ_READ_CB)  # callbacks are one-shot; re-arm
+
+    # ---- sessions (multi-project) ----
+    def _scan_sessions(self):
+        """Read every live session, expiring stale/old files on the way.
+
+        Returns {sid: record}. A finished (DONE) session lingers for
+        done_ttl_seconds so you can see it just finished; a WORKING/WAITING
+        session that stopped updating (terminal closed, or a run cancelled with
+        Escape so no hook fired) is dropped after stale_seconds (anti-stuck).
+        """
+        now = time.time()
+        stale = self.cfg.get("stale_seconds", 60)
+        done_ttl = self.cfg.get("done_ttl_seconds", 20)
+        sessions = {}
+        try:
+            names = os.listdir(SESSIONS_DIR)
+        except OSError:
+            names = []
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(SESSIONS_DIR, name)
+            try:
+                with open(path) as f:
+                    rec = json.load(f)
+            except Exception:
+                continue
+            state = rec.get("state")
+            if state not in self.states:
+                continue
+            age = now - rec.get("updated", 0)
+            if (state == "DONE" and age > done_ttl) or (state != "DONE" and age > stale):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                continue
+            rec["_sid"] = name[:-5]
+            sessions[name[:-5]] = rec
+        # Upgrade fallback: no per-session files yet, but a legacy state file exists.
+        if not sessions:
+            legacy = read_state()
+            if legacy in self.states and legacy != "DONE":
+                sessions["_legacy"] = {"state": legacy, "project": "", "_sid": "_legacy"}
+        return sessions
+
+    def _aggregate_state(self, sessions):
+        """The loudest live state wins (WAITING > WORKING > DONE)."""
+        if not sessions:
+            return "DONE"
+        return max((s["state"] for s in sessions.values()),
+                   key=lambda st: STATE_PRIORITY.get(st, 0))
+
+    def _summary(self, sessions):
+        counts = {"WAITING": 0, "WORKING": 0, "DONE": 0}
+        for s in sessions.values():
+            counts[s["state"]] = counts.get(s["state"], 0) + 1
+        parts = []
+        if counts["WAITING"]:
+            parts.append(f'{counts["WAITING"]} needs you')
+        if counts["WORKING"]:
+            parts.append(f'{counts["WORKING"]} working')
+        if counts["DONE"]:
+            parts.append(f'{counts["DONE"]} done')
+        return ", ".join(parts) or "idle"
+
+    def _recompute(self, initial=False):
+        """Rescan sessions, refresh the menu, and drive the icon off the aggregate."""
+        sessions = self._scan_sessions()
+        self._sessions = sessions
+        self._rebuild_session_menu(sessions)
+        self._manage_sweep(sessions)
+        agg = self._aggregate_state(sessions)
+        if initial:
+            self.current = None
+            self.red_since = None
+            self.apply(agg, alert=False)
+        else:
+            self._process(agg)
+
+    def _rebuild_session_menu(self, sessions):
+        """Render one clickable row per session (loudest first); click → focus it."""
+        sig = tuple(sorted((s["_sid"], s["state"], s.get("project", ""))
+                           for s in sessions.values()))
+        if sig == self._menu_sig:
+            return
+        self._menu_sig = sig
+        self.info.title = f"Status: {self._summary(sessions)}"
+        if list(self.sessions_menu.keys()):
+            self.sessions_menu.clear()  # rumps only builds the submenu's NSMenu once it has a child
+        live = sorted(sessions.values(),
+                      key=lambda s: (-STATE_PRIORITY.get(s["state"], 0), s.get("project", "")))
+        # only offer a real "focus" target when we actually know where the session lives
+        live = [s for s in live if s.get("_sid") != "_legacy"]
+        if not live:
+            self.sessions_menu.add(rumps.MenuItem("No active sessions"))
+            return
+        seen = {}
+        for s in live:
+            icon = self.states[s["state"]]["icon"]
+            title = f'{icon} {s.get("project") or "session"}'
+            seen[title] = seen.get(title, 0) + 1
+            if seen[title] > 1:
+                title = f'{title} ·{seen[title]}'  # keep menu keys unique
+            self.sessions_menu.add(rumps.MenuItem(title, callback=self._make_focus_cb(s)))
+
+    def _make_focus_cb(self, rec):
+        def _cb(_sender):
+            self.focus_session(rec)
+        return _cb
+
+    def _focus_top(self, _sender):
+        """Focus whichever session most wants attention (WAITING before WORKING)."""
+        live = [s for s in self._sessions.values() if s.get("_sid") != "_legacy"]
+        if not live:
+            return
+        live.sort(key=lambda s: (-STATE_PRIORITY.get(s["state"], 0), -s.get("updated", 0)))
+        self.focus_session(live[0])
+
+    def focus_session(self, rec):
+        script = build_focus_script(rec)
+        if not script:
+            return
+        subprocess.Popen(["osascript", "-e", script],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _manage_sweep(self, sessions):
+        """Run the janitor timer only while something is worth watching."""
+        need = len(sessions) > 1 or any(s["state"] != "DONE" for s in sessions.values())
+        if need and not self._sweep_running:
+            self._t_sweep.start()
+            self._sweep_running = True
+        elif not need and self._sweep_running:
+            self._t_sweep.stop()
+            self._sweep_running = False
+
+    def _sweep(self, _):
+        self._recompute()
 
     # ---- state handling ----
     def _process(self, raw):
@@ -400,22 +599,14 @@ class Semaphore(rumps.App):
         """The WAITING window elapsed: if it's still waiting, it's a real one."""
         self._t_debounce.stop()
         self.red_since = None
-        if self.current != DEBOUNCE_STATE and read_state() == DEBOUNCE_STATE:
+        if self.current != DEBOUNCE_STATE and self._aggregate_state(self._scan_sessions()) == DEBOUNCE_STATE:
             self.apply(DEBOUNCE_STATE)
 
     def animate(self, _):
         if self.current != ANIM_STATE:
             return
-        # Anti-stuck: a WORKING that hasn't changed in stale_seconds (e.g. cancelled
-        # with Escape, so no hook fired) auto-resets to done. This runs only while
-        # WORKING, which is exactly when the animation timer is active.
-        try:
-            age = time.time() - os.path.getmtime(STATE_FILE)
-        except OSError:
-            age = 0.0
-        if age > self.cfg["stale_seconds"] and read_state() == ANIM_STATE:
-            self.apply("DONE", alert=False)
-            return
+        # Anti-stuck now lives in the sweep janitor (it expires stale sessions),
+        # so this timer only advances the hourglass while WORKING.
         self.frame = (self.frame + 1) % len(self.frames)
         elapsed = ""
         if self.cfg.get("show_elapsed") and self.work_since:
@@ -435,7 +626,7 @@ class Semaphore(rumps.App):
             self._t_anim.stop()
             self._anim_running = False
         self.title = self._make_title(state)
-        self.info.title = f'Status: {st["label"]}'
+        # (the "Status:" line is a per-session summary owned by _rebuild_session_menu)
         if alert:
             snd = resolve_sound(st.get("sound")) if self.sound_on else None
             if snd:

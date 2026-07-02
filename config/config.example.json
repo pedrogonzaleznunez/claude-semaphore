@@ -12,6 +12,8 @@
   "red_debounce_seconds": 0.8,
   "anim_seconds": 0.6,
   "stale_seconds": 60,
+  "done_ttl_seconds": 20,
+  "sweep_seconds": 4,
 
   "show_elapsed": false
 }

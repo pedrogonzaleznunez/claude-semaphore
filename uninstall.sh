@@ -30,7 +30,7 @@ try:
 except Exception:
     sys.exit(0)
 shutil.copy(p, p + ".bak-" + time.strftime("%Y%m%d-%H%M%S"))
-MARK = ".claude-semaphore/state"
+MARK = ".claude-semaphore/"  # matchea el viejo …/state y el nuevo …/hook.py
 hooks = s.get("hooks", {})
 for event in list(hooks.keys()):
     hooks[event] = [e for e in hooks[event]

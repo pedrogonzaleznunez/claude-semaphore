@@ -18,20 +18,22 @@ On **finished** and **needs you** it also plays a sound and posts a macOS notifi
 
 ## How it works
 
-Two halves talk through a tiny state file:
+Two halves talk through per-session state files:
 
 ```
-Claude Code ──(hooks)──▶ ~/.claude-semaphore/state ──(kqueue events)──▶ menu bar app
+Claude Code ──(hooks)──▶ ~/.claude-semaphore/sessions/<id>.json ──(kqueue events)──▶ menu bar app
 ```
 
-- **The brain — hooks.** Claude Code [hooks](https://docs.claude.com/en/docs/claude-code/hooks) write a word (`WORKING` / `WAITING` / `DONE`) to the state file on each event. This part is plain `printf`, so it's fully portable.
-- **The face — `main.py`.** A [`rumps`](https://github.com/jaredks/rumps) menu bar app watches the state file with **`kqueue`** hooked into the main run loop (no polling) — updates arrive by event on write. It updates the icon, plays sounds and posts notifications. The only timers are the hourglass animation (which runs *only* while working) and a one-shot debounce.
+- **The brain — hooks.** Claude Code [hooks](https://docs.claude.com/en/docs/claude-code/hooks) call a tiny `hook.py` on each event. It reads the hook's JSON (session id, cwd, terminal identity) and writes one small file **per Claude session** — so several projects can run at once without stepping on each other.
+- **The face — `main.py`.** A [`rumps`](https://github.com/jaredks/rumps) menu bar app watches the `sessions/` dir with **`kqueue`** hooked into the main run loop (no polling) — updates arrive by event on write. It aggregates every session into one icon (**the loudest state wins**: needs-you ▸ working ▸ done), lists them in the menu, plays sounds and posts notifications.
 
-**Detecting "needs you" without a dedicated event.** Claude Code's `Notification` hook does not fire for permission prompts while the terminal is focused. So instead: every tool fires `PreToolUse` (→ `WAITING`) and, when it finishes, `PostToolUse` (→ `WORKING`). A tool that runs on its own flips back in milliseconds; a tool that waits for your confirmation stays in `WAITING`. A short **debounce** filters the fast blips so only a real wait turns the icon red.
+**Multi-project.** Each row in the menu is one session (`icon project`). Click a row — or the status line at the top — to **jump straight to that terminal**: it focuses the exact tab in Terminal.app / iTerm2 (matched by tty), or brings the right app forward for other terminals.
+
+**Detecting "needs you".** `WAITING` comes straight from Claude Code's `Notification` hook with `matcher: "permission_prompt"` — the real "I need your approval" signal, which fires whether or not the terminal is focused. (Earlier versions guessed it from `PreToolUse`/`PostToolUse` timing, which false-alarmed on any tool that ran longer than the debounce — e.g. a slow command. That heuristic is gone.)
 
 **No moving text.** The working animation swaps only the emoji (⌛️ ↔ ⏳). Both emojis are the same width, so the label next to it never shifts.
 
-**Anti-stuck.** If you cancel Claude with `Escape`, no hook fires and the state would stay `WORKING` forever — so a `WORKING` state that hasn't changed in `stale_seconds` auto-resets to `DONE`.
+**Anti-stuck.** If you cancel Claude with `Escape`, no hook fires and a session would stay `WORKING` forever — so a light janitor (running only while sessions are active) drops any session that hasn't updated in `stale_seconds`, and finished sessions linger for `done_ttl_seconds` before they leave the menu.
 
 ---
 
@@ -46,7 +48,7 @@ cd claude-semaphore
 The installer:
 
 1. Creates `~/.claude-semaphore/` with its own Python venv + `rumps`.
-2. Copies `main.py` and creates `config.json` (an existing one is respected).
+2. Copies `main.py` + `hook.py` and creates `config.json` (an existing one is respected).
 3. **Safely merges** the hooks into `~/.claude/settings.json` — it backs the file up first and never overwrites your existing settings (idempotent: re-running won't duplicate).
 4. Installs a LaunchAgent so the app starts at login, and launches it now.
 5. Drops a `Claude Semaphore.app` into `~/Applications` so you can [reopen it manually](#reopening-it-manually) from Spotlight/Finder.
@@ -59,6 +61,8 @@ The installer:
 
 Click the icon:
 
+- **Status** — a one-line summary (e.g. *1 needs you, 2 working*). Click it to jump to the session that most wants your attention.
+- **Sessions** — one row per active Claude session (`icon project`). Click a row to focus that session's terminal tab/window.
 - **Notifications** — toggle the macOS notifications.
 - **Play sounds** — master switch for all sounds.
 - **Sound per state** — pick the sound for each state (**Finished** / **Working** / **Needs you**) from the macOS system sounds, or **None**. It previews the sound as you pick it and remembers your choice across restarts (overriding `config.json`).
@@ -85,9 +89,11 @@ Everything visible lives in `~/.claude-semaphore/config.json` (see [`config.exam
 | `states.*.sound` | a `/System/Library/Sounds` name (e.g. `Glass.aiff`), an absolute path, or `null` |
 | `states.*.notify` | whether that state posts a notification |
 | `cooking_frames` | the emojis the "working" state alternates through |
-| `red_debounce_seconds` | how long `WAITING` must persist to count as a real wait |
+| `red_debounce_seconds` | how long `WAITING` must persist to count as a real wait (filters an instant approval) |
 | `anim_seconds` | animation speed |
-| `stale_seconds` | idle `WORKING` time before auto-resetting to done |
+| `stale_seconds` | idle time before a stuck session is dropped |
+| `done_ttl_seconds` | how long a finished session lingers in the menu before it's removed |
+| `sweep_seconds` | janitor cadence while sessions are active |
 | `show_elapsed` | append an elapsed timer while working (note: may slightly shift the text) |
 
 Edit it, then **Restart (hard reset)** from the menu.
