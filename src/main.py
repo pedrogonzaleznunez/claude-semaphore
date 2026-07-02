@@ -666,7 +666,13 @@ class Semaphore(rumps.App):
         """The WAITING window elapsed: if it's still waiting, it's a real one."""
         self._t_debounce.stop()
         self.red_since = None
-        if self.current != DEBOUNCE_STATE and self._aggregate_state(self._scan_sessions()) == DEBOUNCE_STATE:
+        if self.current == DEBOUNCE_STATE:
+            return
+        sessions = self._scan_sessions()
+        if self._aggregate_state(sessions) == DEBOUNCE_STATE:
+            # refresh state so the notification knows which project is waiting
+            self._sessions = sessions
+            self._track_elapsed(sessions)
             self.apply(DEBOUNCE_STATE)
 
     def animate(self, _):
@@ -681,24 +687,28 @@ class Semaphore(rumps.App):
         self.title = self._make_title(ANIM_STATE, frame_icon=self.frames[self.frame], elapsed=elapsed)
 
     def _notify(self, state):
-        """Post a macOS notification naming the project and what it's about."""
+        """Post a macOS notification naming the project and what it's about.
+
+        The detail goes in the *body* (never empty — an empty-body notification
+        won't reliably show) and the project headline in the title.
+        """
         rec = self._relevant_session(state)
         project = (rec or {}).get("project", "")
         icon = self.states[state]["icon"]
         if state == DEBOUNCE_STATE:
             title = f'{icon}  {project} needs you' if project else f'{icon}  Claude needs you'
-            subtitle = "Waiting for your approval"
+            body = "Waiting for your approval"
         elif state == "DONE":
             title = f'{icon}  {project} finished' if project else f'{icon}  Claude finished'
             took = (rec or {}).get("_work_took", 0)
-            subtitle = f"Took {_fmt_elapsed(took)}" if took >= 1 else "Done"
+            body = f"Took {_fmt_elapsed(took)}" if took >= 1 else "Done"
         else:
-            title = f'{icon}  Claude {self.states[state].get("label", "")}'.rstrip()
-            subtitle = ""
-        args = ["osascript", "-e",
-                f'display notification "" with title "{_osa_escape(title)}"'
-                + (f' subtitle "{_osa_escape(subtitle)}"' if subtitle else "")]
-        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            title = "Claude Semaphore"
+            body = f'{icon} {self.states[state].get("label", "")}'.strip()
+        subprocess.Popen(
+            ["osascript", "-e",
+             f'display notification "{_osa_escape(body)}" with title "{_osa_escape(title)}"'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _relevant_session(self, state):
         """The most-recently-updated session driving the current state (for the notif)."""
