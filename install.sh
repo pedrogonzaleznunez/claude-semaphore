@@ -120,7 +120,24 @@ launchctl load "$PLIST"
 #     (sin -k: si ya está corriendo, es un no-op).
 echo "🖱  Creando app para abrir manualmente en ${APP_BUNDLE}…"
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
-mkdir -p "$MACOS_DIR"
+RES_DIR="$APP_BUNDLE/Contents/Resources"
+mkdir -p "$MACOS_DIR" "$RES_DIR"
+
+# Ícono de la app (para Spotlight/Finder): genera un .icns desde el PNG.
+ICON_SRC="$SCRIPT_DIR/assets/icono-semaforo-512.png"
+if [[ -f "$ICON_SRC" ]] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+  echo "🎨 Generando ícono de la app…"
+  ICONSET="$(mktemp -d)/AppIcon.iconset"
+  mkdir -p "$ICONSET"
+  for spec in "16:16x16" "32:16x16@2x" "32:32x32" "64:32x32@2x" \
+              "128:128x128" "256:128x128@2x" "256:256x256" "512:256x256@2x" "512:512x512"; do
+    px="${spec%%:*}"; name="${spec##*:}"
+    sips -z "$px" "$px" "$ICON_SRC" --out "$ICONSET/icon_${name}.png" >/dev/null 2>&1
+  done
+  iconutil -c icns "$ICONSET" -o "$RES_DIR/AppIcon.icns" 2>/dev/null \
+    || echo "⚠️  No se pudo generar el ícono; se usará el genérico."
+  rm -rf "$(dirname "$ICONSET")"
+fi
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -131,6 +148,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key><string>$APP_NAME</string>
     <key>CFBundleIdentifier</key><string>com.claude-semaphore.launcher</string>
     <key>CFBundleExecutable</key><string>launcher</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
     <key>CFBundleVersion</key><string>1.0</string>
@@ -155,7 +173,9 @@ fi
 EOF
 chmod +x "$MACOS_DIR/launcher"
 
-# Refrescar el registro de LaunchServices para que Spotlight/Finder la vean ya.
+# Refrescar LaunchServices e invalidar el cache de íconos (si no, Finder/Spotlight
+# pueden seguir mostrando el ícono genérico).
+touch "$APP_BUNDLE"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
   -f "$APP_BUNDLE" 2>/dev/null || true
 
