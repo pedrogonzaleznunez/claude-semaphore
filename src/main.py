@@ -19,6 +19,7 @@ config.example.json). macOS-only for now.
 import fcntl
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -29,6 +30,16 @@ try:
     import AppKit  # ships with pyobjc (a rumps dependency)
 except Exception:
     AppKit = None
+
+try:
+    # Bridge a kqueue fd into the main run loop, so state changes are delivered by
+    # event (no polling) and handled on the main thread (safe for UI updates).
+    from Foundation import (CFFileDescriptorCreate,
+                            CFFileDescriptorCreateRunLoopSource,
+                            CFFileDescriptorEnableCallBacks, CFRunLoopAddSource,
+                            CFRunLoopGetMain, kCFRunLoopDefaultMode)
+except Exception:
+    CFFileDescriptorCreate = None  # fall back to a poll timer if unavailable
 
 APP_ID = "com.claude-semaphore.agent"
 APP_DIR = os.path.expanduser("~/.claude-semaphore")
@@ -46,6 +57,13 @@ SOUND_MENU_NAMES = {"DONE": "Finished", "WORKING": "Working", "WAITING": "Needs 
 ANIM_STATE = "WORKING"
 DEBOUNCE_STATE = "WAITING"
 
+# kqueue file-watching constants (no polling).
+O_EVTONLY = 0x8000          # macOS: open a fd only to receive kqueue events
+KQ_READ_CB = 1              # kCFFileDescriptorReadCallBack
+_FILE_FFLAGS = (select.KQ_NOTE_WRITE | select.KQ_NOTE_EXTEND | select.KQ_NOTE_DELETE
+                | select.KQ_NOTE_RENAME | select.KQ_NOTE_ATTRIB)
+_DIR_FFLAGS = (select.KQ_NOTE_WRITE | select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME)
+
 DEFAULTS = {
     "states": {
         "DONE":    {"icon": "✅", "label": "Claudia finished",  "sound": "Glass.aiff",  "notify": True},
@@ -53,7 +71,6 @@ DEFAULTS = {
         "WAITING": {"icon": "‼️", "label": "Claudia needs you", "sound": "Sosumi.aiff", "notify": True},
     },
     "cooking_frames": ["⌛️", "⏳"],
-    "poll_seconds": 0.25,
     "red_debounce_seconds": 0.8,
     "anim_seconds": 0.6,
     "stale_seconds": 60,
@@ -201,19 +218,32 @@ class Semaphore(rumps.App):
         self.red_since = None      # when DEBOUNCE_STATE started (for debounce)
         self.frame = 0             # hourglass frame
         self.work_since = 0.0      # when WORKING started (for the elapsed timer)
-        self._dock_hidden = False
 
+        # Timers are event-driven now: the animation timer runs *only* while
+        # WORKING (it also does the anti-stuck check); the debounce timer is a
+        # one-shot armed when WAITING appears. Neither polls the state file.
+        self._t_anim = rumps.Timer(self.animate, cfg["anim_seconds"])
+        self._anim_running = False
+        self._t_debounce = rumps.Timer(self._debounce_fire, cfg["red_debounce_seconds"])
+
+        # Show the initial state (silently, no sound/notification on launch).
         initial = read_state()
         if initial in self.states:
-            self.current = initial
-            self.title = self._make_title(initial)
-            self.info.title = f'Status: {self.states[initial]["label"]}'
+            self.apply(initial, alert=False)
 
-        # Timers with intervals from config (programmatic, not decorators).
-        self._t_tick = rumps.Timer(self.tick, cfg["poll_seconds"])
-        self._t_anim = rumps.Timer(self.animate, cfg["anim_seconds"])
-        self._t_tick.start()
-        self._t_anim.start()
+        # Watch the state file by event (kqueue on the main run loop); fall back
+        # to a light poll only if the CoreFoundation bridge isn't available.
+        self._file_fd = -1
+        self._dir_fd = -1
+        if CFFileDescriptorCreate is not None:
+            self._setup_watch()
+        else:
+            self._t_poll = rumps.Timer(lambda _: self._process(read_state()), 0.25)
+            self._t_poll.start()
+
+        # Re-assert menu-bar-only mode shortly after launch (run() can reset it).
+        self._t_dock = rumps.Timer(self._hide_dock_once, 0.5)
+        self._t_dock.start()
 
     # ---- helpers ----
     def _make_title(self, state, frame_icon=None, elapsed=""):
@@ -292,42 +322,99 @@ class Semaphore(rumps.App):
         self.frame = 0
         self.apply("DONE", alert=False)
 
-    # ---- timers ----
-    def tick(self, _):
-        if not self._dock_hidden:
-            hide_from_dock()
-            self._dock_hidden = True
+    def _hide_dock_once(self, sender):
+        hide_from_dock()
+        sender.stop()
 
-        raw = read_state()
+    # ---- state file watcher (kqueue on the main run loop; no polling) ----
+    def _setup_watch(self):
+        self._kq = select.kqueue()
+        # Watch the dir (stable inode) so we notice the state file being (re)created,
+        # and the file itself for in-place writes (the hooks do `printf > file`).
+        try:
+            self._dir_fd = os.open(APP_DIR, O_EVTONLY)
+            self._kq_register(self._dir_fd, _DIR_FFLAGS)
+        except OSError:
+            self._dir_fd = -1
+        self._open_state_file()
+        self._cffd = CFFileDescriptorCreate(None, self._kq.fileno(), False, self._on_kq, None)
+        src = CFFileDescriptorCreateRunLoopSource(None, self._cffd, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopDefaultMode)
+        CFFileDescriptorEnableCallBacks(self._cffd, KQ_READ_CB)
+        self._cffd_src = src  # keep a ref so it isn't collected
+
+    def _kq_register(self, fd, fflags):
+        ev = select.kevent(fd, filter=select.KQ_FILTER_VNODE,
+                           flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR, fflags=fflags)
+        self._kq.control([ev], 0, 0)
+
+    def _open_state_file(self):
+        """(Re)attach the file watch to the current state-file inode."""
+        if self._file_fd >= 0:
+            try:
+                os.close(self._file_fd)
+            except OSError:
+                pass
+            self._file_fd = -1
+        try:
+            fd = os.open(STATE_FILE, O_EVTONLY)
+            self._kq_register(fd, _FILE_FFLAGS)
+            self._file_fd = fd
+        except OSError:
+            self._file_fd = -1
+
+    def _on_kq(self, cffd, callback_types, info):
+        try:
+            events = self._kq.control(None, 16, 0)  # drain, non-blocking
+        except OSError:
+            events = []
+        file_gone = any(e.ident == self._file_fd
+                        and (e.fflags & (select.KQ_NOTE_DELETE | select.KQ_NOTE_RENAME))
+                        for e in events)
+        dir_touched = any(e.ident == self._dir_fd for e in events)
+        if file_gone or (dir_touched and self._file_fd < 0):
+            self._open_state_file()  # reattach to the recreated file
+        self._process(read_state())
+        CFFileDescriptorEnableCallBacks(cffd, KQ_READ_CB)  # callbacks are one-shot; re-arm
+
+    # ---- state handling ----
+    def _process(self, raw):
+        """React to a state token (from an event, the debounce timer, or startup)."""
         if raw not in self.states:
             return
-
-        silent = False
-        # Anti-stuck auto-reset: stale WORKING with no activity => treat as done.
-        if raw == ANIM_STATE:
-            try:
-                age = time.time() - os.path.getmtime(STATE_FILE)
-            except OSError:
-                age = 0.0
-            if age > self.cfg["stale_seconds"]:
-                raw = "DONE"
-                silent = True
-
         if raw == DEBOUNCE_STATE:
-            if self.red_since is None:
+            if self.current == DEBOUNCE_STATE:
+                return                      # already red
+            if self.red_since is None:      # arm the debounce window (filters fast blips)
                 self.red_since = time.time()
-            if time.time() - self.red_since < self.cfg["red_debounce_seconds"]:
-                return  # not stable yet; ignore the blip from fast tools
-            new = DEBOUNCE_STATE
-        else:
+                self._t_debounce.start()
+            return
+        # Any non-WAITING state cancels a pending debounce and applies immediately.
+        if self.red_since is not None:
             self.red_since = None
-            new = raw
+            self._t_debounce.stop()
+        if raw != self.current:
+            self.apply(raw)
 
-        if new != self.current:
-            self.apply(new, alert=not silent)
+    def _debounce_fire(self, _):
+        """The WAITING window elapsed: if it's still waiting, it's a real one."""
+        self._t_debounce.stop()
+        self.red_since = None
+        if self.current != DEBOUNCE_STATE and read_state() == DEBOUNCE_STATE:
+            self.apply(DEBOUNCE_STATE)
 
     def animate(self, _):
         if self.current != ANIM_STATE:
+            return
+        # Anti-stuck: a WORKING that hasn't changed in stale_seconds (e.g. cancelled
+        # with Escape, so no hook fired) auto-resets to done. This runs only while
+        # WORKING, which is exactly when the animation timer is active.
+        try:
+            age = time.time() - os.path.getmtime(STATE_FILE)
+        except OSError:
+            age = 0.0
+        if age > self.cfg["stale_seconds"] and read_state() == ANIM_STATE:
+            self.apply("DONE", alert=False)
             return
         self.frame = (self.frame + 1) % len(self.frames)
         elapsed = ""
@@ -338,8 +425,15 @@ class Semaphore(rumps.App):
     def apply(self, state, alert=True):
         st = self.states[state]
         self.frame = 0
+        # Run the animation timer only while WORKING (it also does the stale check).
         if state == ANIM_STATE:
             self.work_since = time.time()
+            if not self._anim_running:
+                self._t_anim.start()
+                self._anim_running = True
+        elif self._anim_running:
+            self._t_anim.stop()
+            self._anim_running = False
         self.title = self._make_title(state)
         self.info.title = f'Status: {st["label"]}'
         if alert:

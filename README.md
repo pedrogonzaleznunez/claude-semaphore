@@ -21,11 +21,11 @@ On **finished** and **needs you** it also plays a sound and posts a macOS notifi
 Two halves talk through a tiny state file:
 
 ```
-Claude Code ──(hooks)──▶ ~/.claude-semaphore/state ──(polling)──▶ menu bar app
+Claude Code ──(hooks)──▶ ~/.claude-semaphore/state ──(kqueue events)──▶ menu bar app
 ```
 
 - **The brain — hooks.** Claude Code [hooks](https://docs.claude.com/en/docs/claude-code/hooks) write a word (`WORKING` / `WAITING` / `DONE`) to the state file on each event. This part is plain `printf`, so it's fully portable.
-- **The face — `main.py`.** A [`rumps`](https://github.com/jaredks/rumps) menu bar app polls the file and updates the icon, plays sounds and posts notifications.
+- **The face — `main.py`.** A [`rumps`](https://github.com/jaredks/rumps) menu bar app watches the state file with **`kqueue`** hooked into the main run loop (no polling) — updates arrive by event on write. It updates the icon, plays sounds and posts notifications. The only timers are the hourglass animation (which runs *only* while working) and a one-shot debounce.
 
 **Detecting "needs you" without a dedicated event.** Claude Code's `Notification` hook does not fire for permission prompts while the terminal is focused. So instead: every tool fires `PreToolUse` (→ `WAITING`) and, when it finishes, `PostToolUse` (→ `WORKING`). A tool that runs on its own flips back in milliseconds; a tool that waits for your confirmation stays in `WAITING`. A short **debounce** filters the fast blips so only a real wait turns the icon red.
 
@@ -85,7 +85,6 @@ Everything visible lives in `~/.claude-semaphore/config.json` (see [`config.exam
 | `states.*.sound` | a `/System/Library/Sounds` name (e.g. `Glass.aiff`), an absolute path, or `null` |
 | `states.*.notify` | whether that state posts a notification |
 | `cooking_frames` | the emojis the "working" state alternates through |
-| `poll_seconds` | how often the state file is read |
 | `red_debounce_seconds` | how long `WAITING` must persist to count as a real wait |
 | `anim_seconds` | animation speed |
 | `stale_seconds` | idle `WORKING` time before auto-resetting to done |

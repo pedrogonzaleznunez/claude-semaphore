@@ -9,7 +9,6 @@
 
   "cooking_frames": ["⌛️", "⏳"],
 
-  "poll_seconds": 0.25,
   "red_debounce_seconds": 0.8,
   "anim_seconds": 0.6,
   "stale_seconds": 60,
