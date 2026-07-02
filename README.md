@@ -38,7 +38,7 @@ Claude Code ──(hooks)──▶ ~/.claude-semaphore/state ──(kqueue event
 ## Install
 
 ```bash
-git clone https://github.com/<you>/claude-semaphore.git
+git clone https://github.com/pedrogonzaleznunez/claude-semaphore.git
 cd claude-semaphore
 ./install.sh
 ```
