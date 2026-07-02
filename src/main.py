@@ -277,15 +277,19 @@ class Semaphore(rumps.App):
             if st in self.states:
                 self.states[st]["sound"] = val
 
-        # Clicking the status line jumps to whichever session most wants attention.
+        # Header: a one-line summary; click it to jump to whatever needs attention.
         self.info = rumps.MenuItem("Starting…", callback=self._focus_top)
-        self.sessions_menu = rumps.MenuItem("Sessions")
-        self.item_notif = rumps.MenuItem("Notifications", callback=self.toggle_notif)
+        # Section header for the session rows (no callback -> renders grayed).
+        self.hdr_sessions = rumps.MenuItem("Sessions")
+        self._sessions_anchor = "Sessions"   # stable key we insert session rows after
+        self.item_notif = rumps.MenuItem("🔔  Notifications", callback=self.toggle_notif)
         self.item_notif.state = 1 if self.notif_on else 0
-        self.item_sound = rumps.MenuItem("Play sounds", callback=self.toggle_sound)
+        self.item_sound = rumps.MenuItem("🔊  Sounds", callback=self.toggle_sound)
         self.item_sound.state = 1 if self.sound_on else 0
-        self.item_reset = rumps.MenuItem("Restart (hard reset)", callback=self.restart)
-        self.menu = [self.info, self.sessions_menu, None,
+        self.item_reset = rumps.MenuItem("♻︎  Restart", callback=self.restart)
+        self.menu = [self.info, None,
+                     self.hdr_sessions,          # session rows get inserted right after this
+                     None,
                      self.item_notif, self.item_sound, self._build_sound_menu(),
                      None, self.item_reset]
 
@@ -294,7 +298,10 @@ class Semaphore(rumps.App):
         self.frame = 0             # hourglass frame
         self.work_since = 0.0      # when WORKING started (for the elapsed timer)
         self._sessions = {}        # sid -> record, refreshed on every recompute
+        self._since = {}           # sid -> (state, entered_ts): how long it's been in this state
+        self._work_took = {}       # sid -> seconds spent WORKING before it last finished
         self._menu_sig = None      # signature of the last-rendered session list (skip no-op rebuilds)
+        self._row_keys = []        # menu keys of the currently-inserted session rows
 
         # Timers are event-driven: the animation timer runs *only* while WORKING;
         # the debounce timer is a one-shot armed when WAITING appears; the sweep
@@ -325,11 +332,23 @@ class Semaphore(rumps.App):
         self._t_dock.start()
 
     # ---- helpers ----
+    def _live(self):
+        """Real sessions (drops the legacy single-file placeholder)."""
+        return [s for s in self._sessions.values() if s.get("_sid") != "_legacy"]
+
     def _make_title(self, state, frame_icon=None, elapsed=""):
         st = self.states[state]
         icon = frame_icon if frame_icon else st["icon"]
         suffix = f" {elapsed}" if elapsed else ""
         return f'{icon} {st["label"]}{suffix}'
+
+    def _header_text(self):
+        """The top summary line, e.g. '🔴 needs you · 2 working' or '🟢 idle'."""
+        live = self._live()
+        if not live:
+            return f'{self.states["DONE"]["icon"]}  idle'
+        agg = self._aggregate_state(self._sessions)
+        return f'{self.states[agg]["icon"]}  {self._summary(self._sessions)}'
 
     # ---- per-state sound picker ----
     def _build_sound_menu(self):
@@ -503,10 +522,29 @@ class Semaphore(rumps.App):
             parts.append(f'{counts["DONE"]} done')
         return ", ".join(parts) or "idle"
 
+    def _track_elapsed(self, sessions):
+        """Stamp each session with how long it's been in its current state.
+
+        The timer resets only when the state token changes, so a session that
+        stays WORKING across a whole turn accumulates the full task duration.
+        """
+        now = time.time()
+        for sid, rec in sessions.items():
+            prev = self._since.get(sid)
+            if not prev or prev[0] != rec["state"]:
+                if prev and prev[0] == "WORKING":   # remember how long the finished task ran
+                    self._work_took[sid] = now - prev[1]
+                self._since[sid] = (rec["state"], now)
+            rec["_elapsed"] = now - self._since[sid][1]
+            rec["_work_took"] = self._work_took.get(sid, 0)
+        self._since = {sid: v for sid, v in self._since.items() if sid in sessions}
+        self._work_took = {sid: v for sid, v in self._work_took.items() if sid in sessions}
+
     def _recompute(self, initial=False):
         """Rescan sessions, refresh the menu, and drive the icon off the aggregate."""
         sessions = self._scan_sessions()
         self._sessions = sessions
+        self._track_elapsed(sessions)
         self._rebuild_session_menu(sessions)
         self._manage_sweep(sessions)
         agg = self._aggregate_state(sessions)
@@ -517,31 +555,60 @@ class Semaphore(rumps.App):
         else:
             self._process(agg)
 
+    def _row_label(self, rec):
+        """A session row: '🔴  claude-semaphore      1m04s' (loudest states get a time)."""
+        icon = self.states[rec["state"]]["icon"]
+        proj = rec.get("project") or "session"
+        elapsed = rec.get("_elapsed", 0)
+        if rec["state"] == "DONE":
+            suffix = "done"
+        else:
+            suffix = _fmt_elapsed(elapsed) if elapsed >= 1 else ""
+        pad = " " * max(2, 22 - len(proj))   # loosely right-align the time
+        return f'{icon}  {proj}{pad}{suffix}'.rstrip()
+
     def _rebuild_session_menu(self, sessions):
-        """Render one clickable row per session (loudest first); click → focus it."""
-        sig = tuple(sorted((s["_sid"], s["state"], s.get("project", ""))
-                           for s in sessions.values()))
+        """Render one clickable row per session, inline under the Sessions header.
+
+        Loudest first; click a row to focus that terminal. Rebuilt only when the
+        set/state/elapsed-bucket changes, so it isn't churning every event.
+        """
+        live = sorted((s for s in sessions.values() if s.get("_sid") != "_legacy"),
+                      key=lambda s: (-STATE_PRIORITY.get(s["state"], 0), s.get("project", "")))
+        # elapsed bucketed to ~5s so the times refresh occasionally without thrashing
+        sig = tuple((s["_sid"], s["state"], s.get("project", ""), int(s.get("_elapsed", 0)) // 5)
+                    for s in live)
         if sig == self._menu_sig:
             return
         self._menu_sig = sig
-        self.info.title = f"Status: {self._summary(sessions)}"
-        if list(self.sessions_menu.keys()):
-            self.sessions_menu.clear()  # rumps only builds the submenu's NSMenu once it has a child
-        live = sorted(sessions.values(),
-                      key=lambda s: (-STATE_PRIORITY.get(s["state"], 0), s.get("project", "")))
-        # only offer a real "focus" target when we actually know where the session lives
-        live = [s for s in live if s.get("_sid") != "_legacy"]
+        self.info.title = self._header_text()
+
+        # drop the previous rows, then insert the fresh ones after the header
+        for k in self._row_keys:
+            try:
+                self.menu.pop(k)
+            except KeyError:
+                pass
+        self._row_keys = []
+
         if not live:
-            self.sessions_menu.add(rumps.MenuItem("No active sessions"))
+            self.hdr_sessions.title = "Sessions"
+            row = rumps.MenuItem("    no active sessions")   # grayed (no callback)
+            self.menu.insert_after(self._sessions_anchor, row)
+            self._row_keys = [row.title]
             return
+
+        self.hdr_sessions.title = f"Sessions ({len(live)})"
+        anchor = self._sessions_anchor
         seen = {}
         for s in live:
-            icon = self.states[s["state"]]["icon"]
-            title = f'{icon} {s.get("project") or "session"}'
+            title = self._row_label(s)
             seen[title] = seen.get(title, 0) + 1
             if seen[title] > 1:
-                title = f'{title} ·{seen[title]}'  # keep menu keys unique
-            self.sessions_menu.add(rumps.MenuItem(title, callback=self._make_focus_cb(s)))
+                title = f'{title} ·{seen[title]}'   # keep menu keys unique
+            self.menu.insert_after(anchor, rumps.MenuItem(title, callback=self._make_focus_cb(s)))
+            anchor = title              # keep insertion order
+            self._row_keys.append(title)
 
     def _make_focus_cb(self, rec):
         def _cb(_sender):
@@ -613,6 +680,31 @@ class Semaphore(rumps.App):
             elapsed = _fmt_elapsed(time.time() - self.work_since)
         self.title = self._make_title(ANIM_STATE, frame_icon=self.frames[self.frame], elapsed=elapsed)
 
+    def _notify(self, state):
+        """Post a macOS notification naming the project and what it's about."""
+        rec = self._relevant_session(state)
+        project = (rec or {}).get("project", "")
+        icon = self.states[state]["icon"]
+        if state == DEBOUNCE_STATE:
+            title = f'{icon}  {project} needs you' if project else f'{icon}  Claude needs you'
+            subtitle = "Waiting for your approval"
+        elif state == "DONE":
+            title = f'{icon}  {project} finished' if project else f'{icon}  Claude finished'
+            took = (rec or {}).get("_work_took", 0)
+            subtitle = f"Took {_fmt_elapsed(took)}" if took >= 1 else "Done"
+        else:
+            title = f'{icon}  Claude {self.states[state].get("label", "")}'.rstrip()
+            subtitle = ""
+        args = ["osascript", "-e",
+                f'display notification "" with title "{_osa_escape(title)}"'
+                + (f' subtitle "{_osa_escape(subtitle)}"' if subtitle else "")]
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _relevant_session(self, state):
+        """The most-recently-updated session driving the current state (for the notif)."""
+        cands = [s for s in self._live() if s.get("state") == state]
+        return max(cands, key=lambda s: s.get("updated", 0)) if cands else None
+
     def apply(self, state, alert=True):
         st = self.states[state]
         self.frame = 0
@@ -625,19 +717,16 @@ class Semaphore(rumps.App):
         elif self._anim_running:
             self._t_anim.stop()
             self._anim_running = False
+        self.current = state
         self.title = self._make_title(state)
-        # (the "Status:" line is a per-session summary owned by _rebuild_session_menu)
+        # (the header summary line is owned by _rebuild_session_menu)
         if alert:
             snd = resolve_sound(st.get("sound")) if self.sound_on else None
             if snd:
                 subprocess.Popen(["afplay", snd],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if self.notif_on and st.get("notify"):
-                subprocess.Popen(
-                    ["osascript", "-e",
-                     f'display notification "{st["label"]}" with title "Claude Semaphore"'],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.current = state
+                self._notify(state)
 
 
 if __name__ == "__main__":

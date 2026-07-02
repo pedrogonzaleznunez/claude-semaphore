@@ -10,7 +10,7 @@ A tiny macOS **menu bar traffic light** for [Claude Code](https://claude.com/cla
 | ⌛️/⏳ Claude working | working | Claude is thinking / running tools (the hourglass flips) |
 | ‼️ Claude needs you | waiting | Claude is asking for your confirmation |
 
-On **finished** and **needs you** it also plays a sound and posts a macOS notification. **Working** is silent on purpose (it fires constantly).
+On **finished** and **needs you** it also plays a sound and posts a macOS notification naming the project. **Working** is silent on purpose (it fires constantly).
 
 > **Status:** beta, macOS only. Linux/Windows are on the roadmap — PRs welcome.
 
@@ -61,12 +61,12 @@ The installer:
 
 Click the icon:
 
-- **Status** — a one-line summary (e.g. *1 needs you, 2 working*). Click it to jump to the session that most wants your attention.
-- **Sessions** — one row per active Claude session (`icon project`). Click a row to focus that session's terminal tab/window.
-- **Notifications** — toggle the macOS notifications.
-- **Play sounds** — master switch for all sounds.
+- **Header** — a one-line summary (e.g. *1 needs you, 2 working*). Click it to jump to the session that most wants your attention.
+- **Sessions** — one inline row per active Claude session (`icon  project   elapsed`), loudest first. Click a row to focus that session's terminal tab/window.
+- **🔔 Notifications** — toggle the macOS notifications.
+- **🔊 Sounds** — master switch for all sounds.
 - **Sound per state** — pick the sound for each state (**Finished** / **Working** / **Needs you**) from the macOS system sounds, or **None**. It previews the sound as you pick it and remembers your choice across restarts (overriding `config.json`).
-- **Restart (hard reset)** — clears the state and relaunches the process if anything gets stuck.
+- **♻︎ Restart** — clears the state and relaunches the process if anything gets stuck.
 - **Quit Claude Semaphore**.
 
 Both toggles persist across restarts.
