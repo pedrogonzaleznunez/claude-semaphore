@@ -54,9 +54,9 @@ LOCK_FILE = "/tmp/claude-semaphore.lock"
 # Nice, short names for the per-state sound submenus (falls back to the state token).
 SOUND_MENU_NAMES = {"DONE": "Finished", "WORKING": "Working", "WAITING": "Needs you"}
 
-# The state whose emoji animates, and the one that gets debounced (permission wait).
+# The state whose emoji animates, and the "needs you" state (the one that alerts).
 ANIM_STATE = "WORKING"
-DEBOUNCE_STATE = "WAITING"
+WAIT_STATE = "WAITING"
 
 # Aggregating many sessions into one icon: the loudest state wins. If any session
 # needs you it's red; else if any is working it's amber; else green.
@@ -84,7 +84,6 @@ DEFAULTS = {
         "WAITING": {"icon": "‼️", "label": "Claudia needs you", "sound": "Sosumi.aiff", "notify": True},
     },
     "cooking_frames": ["⌛️", "⏳"],
-    "red_debounce_seconds": 0.8,
     "anim_seconds": 0.6,
     "stale_seconds": 60,
     "done_ttl_seconds": 20,   # how long a finished session lingers in the menu before it's dropped
@@ -294,7 +293,6 @@ class Semaphore(rumps.App):
                      None, self.item_reset]
 
         self.current = None        # last shown aggregate state token
-        self.red_since = None      # when DEBOUNCE_STATE started (for debounce)
         self.frame = 0             # hourglass frame
         self.work_since = 0.0      # when WORKING started (for the elapsed timer)
         self._sessions = {}        # sid -> record, refreshed on every recompute
@@ -305,12 +303,10 @@ class Semaphore(rumps.App):
         self._ready = False        # gate per-session "finished" alerts until after startup
 
         # Timers are event-driven: the animation timer runs *only* while WORKING;
-        # the debounce timer is a one-shot armed when WAITING appears; the sweep
-        # timer runs only while sessions are active and expires stale ones (the
-        # anti-stuck check, e.g. a run cancelled with Escape). None poll idly.
+        # the sweep timer runs only while sessions are active and expires stale
+        # ones (the anti-stuck check, e.g. a run cancelled with Escape). No idle poll.
         self._t_anim = rumps.Timer(self.animate, cfg["anim_seconds"])
         self._anim_running = False
-        self._t_debounce = rumps.Timer(self._debounce_fire, cfg["red_debounce_seconds"])
         self._t_sweep = rumps.Timer(self._sweep, cfg.get("sweep_seconds", 4))
         self._sweep_running = False
 
@@ -418,7 +414,6 @@ class Semaphore(rumps.App):
         except Exception:
             pass
         self.current = None
-        self.red_since = None
         self.frame = 0
         self.apply("DONE", alert=False)
 
@@ -559,7 +554,6 @@ class Semaphore(rumps.App):
         agg = self._aggregate_state(sessions)
         if initial:
             self.current = None
-            self.red_since = None
             self.apply(agg, alert=False)
         else:
             self._process(agg)
@@ -654,35 +648,16 @@ class Semaphore(rumps.App):
 
     # ---- state handling ----
     def _process(self, raw):
-        """React to a state token (from an event, the debounce timer, or startup)."""
+        """React to a state token (from an event or startup) — apply it immediately.
+
+        No debounce: WAITING now comes straight from the Notification
+        (permission_prompt) hook, a clean signal, so there are no fast blips to
+        filter. Debouncing only delayed the red and hid quickly-approved prompts.
+        """
         if raw not in self.states:
             return
-        if raw == DEBOUNCE_STATE:
-            if self.current == DEBOUNCE_STATE:
-                return                      # already red
-            if self.red_since is None:      # arm the debounce window (filters fast blips)
-                self.red_since = time.time()
-                self._t_debounce.start()
-            return
-        # Any non-WAITING state cancels a pending debounce and applies immediately.
-        if self.red_since is not None:
-            self.red_since = None
-            self._t_debounce.stop()
         if raw != self.current:
             self.apply(raw)
-
-    def _debounce_fire(self, _):
-        """The WAITING window elapsed: if it's still waiting, it's a real one."""
-        self._t_debounce.stop()
-        self.red_since = None
-        if self.current == DEBOUNCE_STATE:
-            return
-        sessions = self._scan_sessions()
-        if self._aggregate_state(sessions) == DEBOUNCE_STATE:
-            # refresh state so the notification knows which project is waiting
-            self._sessions = sessions
-            self._track_elapsed(sessions)
-            self.apply(DEBOUNCE_STATE)
 
     def animate(self, _):
         if self.current != ANIM_STATE:
@@ -716,7 +691,7 @@ class Semaphore(rumps.App):
             rec = self._relevant_session(state)
         project = (rec or {}).get("project", "")
         icon = self.states[state]["icon"]
-        if state == DEBOUNCE_STATE:
+        if state == WAIT_STATE:
             title = f'{icon}  {project} needs you' if project else f'{icon}  Claude needs you'
             body = "Waiting for your approval"
         elif state == "DONE":
@@ -751,8 +726,8 @@ class Semaphore(rumps.App):
         self.title = self._make_title(state)
         # (the header summary line is owned by _rebuild_session_menu)
         # "finished" alerts are fired per session in _track_elapsed; the aggregate
-        # only chimes for a real WAITING (needs-you), after the debounce.
-        if alert and state == DEBOUNCE_STATE:
+        # only chimes for a real WAITING (needs-you).
+        if alert and state == WAIT_STATE:
             self._alert(state)
 
 

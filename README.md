@@ -29,7 +29,7 @@ Claude Code ──(hooks)──▶ ~/.claude-semaphore/sessions/<id>.json ──
 
 **Multi-project.** Each row in the menu is one session (`icon project`). Click a row — or the status line at the top — to **jump straight to that terminal**: it focuses the exact tab in Terminal.app / iTerm2 (matched by tty), or brings the right app forward for other terminals.
 
-**Detecting "needs you".** `WAITING` comes straight from Claude Code's `Notification` hook with `matcher: "permission_prompt"` — the real "I need your approval" signal, which fires whether or not the terminal is focused. (Earlier versions guessed it from `PreToolUse`/`PostToolUse` timing, which false-alarmed on any tool that ran longer than the debounce — e.g. a slow command. That heuristic is gone.)
+**Detecting "needs you".** `WAITING` comes straight from Claude Code's `Notification` hook with `matcher: "permission_prompt"` — the real "I need your approval" signal, which fires whether or not the terminal is focused, and turns the icon red instantly. (Earlier versions guessed it from `PreToolUse`/`PostToolUse` timing, which false-alarmed on any tool that ran a little long — e.g. a slow command. That heuristic is gone.)
 
 **No moving text.** The working animation swaps only the emoji (⌛️ ↔ ⏳). Both emojis are the same width, so the label next to it never shifts.
 
@@ -89,7 +89,6 @@ Everything visible lives in `~/.claude-semaphore/config.json` (see [`config.exam
 | `states.*.sound` | a `/System/Library/Sounds` name (e.g. `Glass.aiff`), an absolute path, or `null` |
 | `states.*.notify` | whether that state posts a notification |
 | `cooking_frames` | the emojis the "working" state alternates through |
-| `red_debounce_seconds` | how long `WAITING` must persist to count as a real wait (filters an instant approval) |
 | `anim_seconds` | animation speed |
 | `stale_seconds` | idle time before a stuck session is dropped |
 | `done_ttl_seconds` | how long a finished session lingers in the menu before it's removed |
